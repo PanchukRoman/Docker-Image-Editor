@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Docker Image Editor — терминальный интерфейс для копирования файлов в/из контейнера
-и создания нового образа на основе изменений.
-"""
-
 import docker
 import subprocess
 import os
@@ -215,47 +209,61 @@ def commit_container(container_id):
         console.print(f"[red]✗ Ошибка при коммите: {e}[/red]")
 
 def main():
-    console.print(Panel.fit("🐳 [bold cyan]Docker Image Editor[/bold cyan] 🐳", border_style="cyan"))
+    while True:
+        console.print(Panel.fit("🐳 [bold cyan]Docker Image Editor[/bold cyan] 🐳", border_style="cyan"))
 
-    action = questionary.select(
-        "Что вы хотите сделать?",
-        choices=[
-            "Сохранить файл(ы) из образа на локальную машину",
-            "Добавить файл(ы) в образ и создать новый образ",
-            "Выйти"
-        ]
-    ).ask()
+        action = questionary.select(
+            "Что вы хотите сделать?",
+            choices=[
+                "Сохранить файл(ы) из образа на локальную машину",
+                "Добавить файл(ы) в образ и создать новый образ",
+                "Выйти"
+            ]
+        ).ask()
 
-    if action == "Выйти" or not action:
-        return
+        if action == "Выйти" or not action:
+            console.print("[yellow]До свидания![/yellow]")
+            break
 
-    # Показываем список локальных образов
-    show_local_images()
+        # Показываем список локальных образов
+        show_local_images()
 
-    image_name = questionary.text("Введите имя образа (например, ubuntu:latest):").ask()
-    if not image_name:
-        return
+        image_name = questionary.text("Введите имя образа (например, ubuntu:latest):").ask()
+        if not image_name:
+            console.print("[yellow]Имя образа не введено. Возврат в меню.[/yellow]")
+            continue
 
-    container_id = docker_run_image(image_name)
+        container_id = None
+        try:
+            container_id = docker_run_image(image_name)
 
-    try:
-        if action.startswith("Сохранить"):
-            while True:
-                choose_files_to_copy_from_container(container_id)
-                if not questionary.confirm("Хотите скопировать ещё файлы?").ask():
-                    break
-        else:  # Добавить файлы
-            while True:
-                choose_files_to_copy_to_container(container_id)
-                if not questionary.confirm("Хотите добавить ещё файлы?").ask():
-                    break
-            if questionary.confirm("Создать новый образ из изменённого контейнера?").ask():
-                commit_container(container_id)
-    finally:
-        if questionary.confirm("Удалить контейнер?").ask():
-            stop_and_remove_container(container_id)
-        else:
-            console.print(f"[yellow]Контейнер {container_id} остаётся запущенным. Не забудьте остановить его вручную.[/yellow]")
+            if action.startswith("Сохранить"):
+                while True:
+                    choose_files_to_copy_from_container(container_id)
+                    if not questionary.confirm("Хотите скопировать ещё файлы?").ask():
+                        break
+            else:  # Добавить файлы
+                while True:
+                    choose_files_to_copy_to_container(container_id)
+                    if not questionary.confirm("Хотите добавить ещё файлы?").ask():
+                        break
+                if questionary.confirm("Создать новый образ из изменённого контейнера?").ask():
+                    commit_container(container_id)
+
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Прервано пользователем.[/yellow]")
+            if container_id:
+                stop_and_remove_container(container_id)
+            break
+        except Exception as e:
+            console.print(f"[red]Произошла ошибка: {e}[/red]")
+        finally:
+            if container_id:
+                if questionary.confirm("Удалить контейнер?").ask():
+                    stop_and_remove_container(container_id)
+                else:
+                    console.print(f"[yellow]Контейнер {container_id} остаётся запущенным. Не забудьте остановить его вручную.[/yellow]")
+        console.print("\n" + "="*50 + "\n")  # разделитель между сессиями
 
 if __name__ == "__main__":
     try:
