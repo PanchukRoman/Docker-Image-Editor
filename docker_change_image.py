@@ -1,7 +1,14 @@
+#!/usr/bin/env python3
+"""
+Docker Image Editor — терминальный интерфейс для копирования файлов в/из контейнера
+и создания нового образа на основе изменений.
+"""
+
 import docker
 import subprocess
 import os
 import sys
+import shlex
 from pathlib import Path
 
 import questionary
@@ -20,14 +27,33 @@ def run_command(cmd):
 
 def get_container_files(container_id, path):
     """Получает список файлов в директории контейнера через docker exec ls."""
+    safe_path = shlex.quote(path)
     try:
-        cmd = f"docker exec {container_id} ls -1 {path}"
+        cmd = f"docker exec {container_id} ls -1 {safe_path}"
         output = subprocess.check_output(cmd, shell=True, text=True).strip()
         if not output:
             return []
         return output.split('\n')
     except subprocess.CalledProcessError:
         return None
+
+def check_path_type(container_id, path):
+    """
+    Проверяет, является ли путь в контейнере файлом, директорией или не существует.
+    Возвращает 'file', 'dir' или None.
+    """
+    safe_path = shlex.quote(path)
+    try:
+        # Проверка на файл
+        subprocess.run(f"docker exec {container_id} test -f {safe_path}", shell=True, check=True, capture_output=True)
+        return 'file'
+    except subprocess.CalledProcessError:
+        try:
+            # Проверка на директорию
+            subprocess.run(f"docker exec {container_id} test -d {safe_path}", shell=True, check=True, capture_output=True)
+            return 'dir'
+        except subprocess.CalledProcessError:
+            return None
 
 def show_local_images():
     """Показывает список локальных Docker образов в виде таблицы."""
@@ -57,7 +83,7 @@ def show_local_images():
         console.print(f"[red]Ошибка при получении списка образов: {e}[/red]")
 
 def docker_run_image(name):
-    """Запускает контейнер из образа с sleep, возвращает ID контейнера."""
+    """Запускает контейнер из образа с командой sleep, возвращает ID контейнера."""
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -72,7 +98,8 @@ def docker_run_image(name):
             console.print(f"[yellow]Образ {name} не найден. Выполняется pull...[/yellow]")
             client.images.pull(name)
         progress.add_task(description="Запуск контейнера...", total=None)
-        container = client.containers.run(name, entrypoint="sleep", command='9999999', detach=True)
+        # Запускаем с командой sleep, не меняя entrypoint
+        container = client.containers.run(name, command=['sleep', '9999999'], detach=True)
     console.print(f"[green]✓[/green] Контейнер запущен, [bold cyan]ID: {container.id}[/bold cyan]")
     return container.id
 
@@ -88,61 +115,74 @@ def stop_and_remove_container(container_id):
     except Exception as e:
         console.print(f"[red]✗ Ошибка при удалении контейнера: {e}[/red]")
 
+def copy_single_file_from_container(container_id, src_path, dest_dir):
+    """Копирует один файл из контейнера."""
+    filename = os.path.basename(src_path.rstrip('/'))
+    dst = os.path.join(dest_dir, filename)
+    cmd = f"docker cp {container_id}:{shlex.quote(src_path)} {shlex.quote(dst)}"
+    with console.status(f"[bold green]Копируется {filename}..."):
+        if run_command(cmd):
+            console.print(f"  [green]✓[/green] {filename} -> {dst}")
+        else:
+            console.print(f"  [red]✗[/red] Ошибка при копировании {filename}")
+
 def choose_files_to_copy_from_container(container_id):
-    """Позволяет пользователю выбрать несколько файлов из контейнера."""
+    """Позволяет пользователю выбрать файлы из контейнера (поддерживает и файл, и директорию)."""
     path = questionary.text(
-        "Введите путь к директории в контейнере (например, /app):",
-        default="/"
+        "Введите путь к файлу или директории в контейнере (например, /etc/nginx/nginx.conf или /app):"
     ).ask()
     if not path:
         return
 
-    files = get_container_files(container_id, path)
-    if files is None:
-        console.print("[red]Не удалось получить список файлов. Проверьте путь.[/red]")
+    # Определяем тип пути
+    path_type = check_path_type(container_id, path)
+    if path_type is None:
+        console.print("[red]Указанный путь не существует в контейнере.[/red]")
         return
 
-    if not files:
-        console.print("[yellow]В этой директории нет файлов.[/yellow]")
-        return
-
-    # Показываем предпросмотр файлов
-    table = Table(title=f"Файлы в {path}")
-    table.add_column("Имя файла", style="cyan")
-    for f in files[:10]:
-        table.add_row(f)
-    if len(files) > 10:
-        table.add_row("... и ещё", str(len(files)-10))
-    console.print(table)
-
-    # Выбор нескольких файлов
-    selected = questionary.checkbox(
-        "Выберите файлы для копирования:",
-        choices=files
-    ).ask()
-
-    if not selected:
-        console.print("[yellow]Ничего не выбрано.[/yellow]")
-        return
-
+    # Запрашиваем целевую локальную директорию
     dest_dir = questionary.path(
         "Введите целевую директорию на локальной машине (по умолчанию /tmp):",
         default="/tmp"
     ).ask()
     if not dest_dir:
         dest_dir = "/tmp"
-
     os.makedirs(dest_dir, exist_ok=True)
 
-    for file in selected:
-        src = f"{container_id}:{path}/{file}"
-        dst = os.path.join(dest_dir, file)
-        cmd = f"docker cp {src} {dst}"
-        with console.status(f"[bold green]Копируется {file}..."):
-            if run_command(cmd):
-                console.print(f"  [green]✓[/green] {file} -> {dst}")
-            else:
-                console.print(f"  [red]✗[/red] Ошибка при копировании {file}")
+    if path_type == 'file':
+        # Просто копируем один файл
+        copy_single_file_from_container(container_id, path, dest_dir)
+    else:  # directory
+        files = get_container_files(container_id, path)
+        if files is None:
+            console.print("[red]Не удалось получить список файлов. Проверьте путь.[/red]")
+            return
+        if not files:
+            console.print("[yellow]В этой директории нет файлов.[/yellow]")
+            return
+
+        # Показываем предпросмотр файлов
+        table = Table(title=f"Файлы в {path}")
+        table.add_column("Имя файла", style="cyan")
+        for f in files[:10]:
+            table.add_row(f)
+        if len(files) > 10:
+            table.add_row("... и ещё", str(len(files)-10))
+        console.print(table)
+
+        # Выбор нескольких файлов
+        selected = questionary.checkbox(
+            "Выберите файлы для копирования:",
+            choices=files
+        ).ask()
+
+        if not selected:
+            console.print("[yellow]Ничего не выбрано.[/yellow]")
+            return
+
+        for file in selected:
+            src_full = f"{path.rstrip('/')}/{file}"
+            copy_single_file_from_container(container_id, src_full, dest_dir)
 
 def choose_files_to_copy_to_container(container_id):
     """Позволяет выбрать локальные файлы и скопировать их в контейнер."""
@@ -185,7 +225,7 @@ def choose_files_to_copy_to_container(container_id):
 
     for local_path in selected:
         filename = os.path.basename(local_path)
-        cmd = f"docker cp {local_path} {container_id}:{target_dir}/"
+        cmd = f"docker cp {shlex.quote(local_path)} {container_id}:{shlex.quote(target_dir)}/"
         with console.status(f"[bold green]Копируется {filename}..."):
             if run_command(cmd):
                 console.print(f"  [green]✓[/green] {filename} скопирован в {target_dir}")
